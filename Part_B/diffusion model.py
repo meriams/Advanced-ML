@@ -52,7 +52,6 @@ class DDPM(nn.Module):
         t = td.uniform.Uniform(1, self.T).sample((x.shape)).to(x.device).long()
         
         noise = torch.randn_like(x).to(x.device)
-
         noise = noise / torch.max(noise)
 
         # print(f"noise : {noise}")
@@ -87,6 +86,7 @@ class DDPM(nn.Module):
         for t in range(self.T-1, -1, -1):
             if t > 0:
                 noise = torch.randn(x_t.shape).to(x_t.device)
+                noise = noise / torch.max(noise)
             else:
                 noise = torch.zeros(x_t.shape).to(x_t.device)
 
