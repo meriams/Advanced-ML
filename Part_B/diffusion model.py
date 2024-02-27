@@ -1,11 +1,9 @@
-# Code for DTU course 02460 (Advanced Machine Learning Spring) by Jes Frellsen, 2024
-# Version 1.0 (2024-02-11)
-
 import torch
 import torch.nn as nn
 import torch.distributions as td
 import torch.nn.functional as F
 from tqdm import tqdm
+from unet import Unet
 import sys
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
@@ -48,21 +46,13 @@ class DDPM(nn.Module):
             The negative ELBO of the batch of dimension `(batch_size,)`.
         """
 
-        # t = td.uniform.Uniform(1, self.T).sample((x.shape)).to(x.device).long()
-        t = td.uniform.Uniform(1, self.T).sample((x.shape)).to(x.device).long()
+        t = td.uniform.Uniform(1, self.T).sample((x.shape[0],1)).to(x.device).long()
         
-        noise = torch.randn_like(x).to(x.device)
-        noise = noise / torch.max(noise)
+        noise = torch.normal(mean=0.0, std=1.0, size=(x.shape)).to(x.device)
 
-        # print(f"noise : {noise}")
-        # print(f"alpha_cumprod {torch.sqrt(self.alpha_cumprod[t]).shape}")
-        
         x_t = x * torch.sqrt(self.alpha_cumprod[t]) + noise * torch.sqrt(1 - self.alpha_cumprod[t])
 
         estimate = self.network(x_t, t)
-
-        # print(f"noise {noise.shape}")
-        # print(f"estimate {estimate.shape}")
 
         neg_elbo = (noise - estimate) ** 2
         
@@ -79,25 +69,22 @@ class DDPM(nn.Module):
         [torch.Tensor]
             The generated samples.
         """
+
         # Sample x_t for t=T (i.e., Gaussian noise)
-        x_t = torch.randn((shape,784)).to(self.alpha.device)
+        x_t = torch.normal(mean=0.0, std=1.0, size=(shape,784)).to(self.alpha.device)
 
         # Sample x_t given x_{t+1} until x_0 is sampled
         for t in range(self.T-1, -1, -1):
             if t > 0:
-                noise = torch.randn(x_t.shape).to(x_t.device)
-                noise = noise / torch.max(noise)
+                noise = torch.normal(mean=0.0, std=1.0, size=(x_t.shape)).to(x_t.device)
             else:
-                noise = torch.zeros(x_t.shape).to(x_t.device)
+                noise = torch.zeros_like(x_t).to(x_t.device)
 
-            t = (torch.ones(x_t.shape).to(x_t.device) * t).long()
-
-            # print(f"x_t : {x_t.shape}")
-            # print(f"t : {t.shape}")
+            t = (torch.ones_like(x_t).to(x_t.device) * t).long()
 
             ### Implement the remaining of Algorithm 2 here ###
-            x_t = 1.0 / torch.sqrt(self.alpha[t]) * (x_t - self.beta[t] / torch.sqrt(1 - self.alpha_cumprod[t]) * self.network(x_t, t)) + noise * torch.sqrt(self.beta[t])
-            
+            x_t = 1.0 / torch.sqrt(self.alpha[t]) * (x_t - self.beta[t] / torch.sqrt(1.0 - self.alpha_cumprod[t]) * self.network(x_t, t)) + noise * torch.sqrt(self.beta[t])
+
         return x_t
 
     def loss(self, x):
@@ -111,8 +98,7 @@ class DDPM(nn.Module):
         [torch.Tensor]
             The loss for the batch.
         """
-        return self.negative_elbo(x).mean()
-
+        return self.negative_elbo(torch.flatten(x, start_dim=1)).mean()
 
 def train(model, optimizer, data_loader, epochs, device):
     """
@@ -150,7 +136,6 @@ def train(model, optimizer, data_loader, epochs, device):
             progress_bar.set_postfix(loss=f"⠀{loss.item():12.4f}", epoch=f"{epoch+1}/{epochs}")
             progress_bar.update()
 
-
 class FcNetwork(nn.Module):
     def __init__(self, input_dim, num_hidden):
         """
@@ -182,7 +167,6 @@ class FcNetwork(nn.Module):
         x_t_cat = torch.cat([x, t], dim=1)
         return self.network(x_t_cat)
 
-
 if __name__ == "__main__":
     import torch.utils.data
     from torchvision import datasets, transforms
@@ -205,23 +189,22 @@ if __name__ == "__main__":
     for key, value in sorted(vars(args).items()):
         print(key, '=', value)
 
-    # Load MNIST as binarized at 'thresshold' and create data loaders
-    thresshold = 0.5
-    train_loader = torch.utils.data.DataLoader(datasets.MNIST('data/', train=True, download=True,
-                                                                    transform=transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: torch.flatten(x)), transforms.Lambda(lambda x: (thresshold < x).float().squeeze())])),
+    # Load MNIST and create data loaders
+    train_loader = torch.utils.data.DataLoader(datasets.MNIST('data/', train=True,
+                                                                    transform=transforms.Compose([transforms.ToTensor()])),
                                                     batch_size=args.batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(datasets.MNIST('data/', train=False, download=True,
-                                                                transform=transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: torch.flatten(x)), transforms.Lambda(lambda x: (thresshold < x).float().squeeze())])),
+    test_loader = torch.utils.data.DataLoader(datasets.MNIST('data/', train=False,
+                                                                transform=transforms.Compose([transforms.ToTensor()])),
                                                     batch_size=args.batch_size, shuffle=True)
 
     # Get the dimension of the dataset
-    D = next(iter(train_loader))[0][0].shape[0]
+    D = next(iter(train_loader))[0].shape
 
-    # print(f"D : {D}")
+    print(D)
 
     # Define the network
-    num_hidden = 64
-    network = FcNetwork(D, num_hidden)
+    num_hidden = 100
+    network = Unet()
 
     # Set the number of steps in the diffusion process
     T = 1000
@@ -245,5 +228,6 @@ if __name__ == "__main__":
 
         # Generate samples
         model.eval()
-        samples = (model.sample(8)).cpu() 
-        save_image(samples.view(8, 1, 28, 28), args.samples)
+        num_samples = 4
+        samples = (model.sample(num_samples)).cpu()
+        save_image(samples.view(num_samples, 1, 28, 28), args.samples)
