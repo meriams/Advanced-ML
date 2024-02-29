@@ -46,13 +46,15 @@ class DDPM(nn.Module):
             The negative ELBO of the batch of dimension `(batch_size,)`.
         """
 
+        # t = torch.randint(0, self.T, (x.shape[0],) + (x.dim()-1)*(1,)).to(x.device)
         t = td.uniform.Uniform(1, self.T).sample((x.shape[0],1)).to(x.device).long()
-        
-        noise = torch.normal(mean=0.0, std=1.0, size=(x.shape)).to(x.device)
+        t_normalized = t / self.T
 
-        x_t = x * torch.sqrt(self.alpha_cumprod[t]) + noise * torch.sqrt(1 - self.alpha_cumprod[t])
+        noise = torch.rand_like(x).to(x.device)
 
-        estimate = self.network(x_t, t)
+        x_t = torch.sqrt(self.alpha_cumprod[t]) * x + torch.sqrt(1 - self.alpha_cumprod[t]) * noise
+
+        estimate = self.network(x_t, t_normalized)
 
         neg_elbo = (noise - estimate) ** 2
         
@@ -71,20 +73,21 @@ class DDPM(nn.Module):
         """
 
         # Sample x_t for t=T (i.e., Gaussian noise)
-        x_t = torch.normal(mean=0.0, std=1.0, size=(shape,784)).to(self.alpha.device)
+        x_t = torch.randn((shape,784)).to(self.alpha.device)
 
         # Sample x_t given x_{t+1} until x_0 is sampled
         for t in range(self.T-1, -1, -1):
-            if t > 0:
-                noise = torch.normal(mean=0.0, std=1.0, size=(x_t.shape)).to(x_t.device)
-            else:
-                noise = torch.zeros_like(x_t).to(x_t.device)
-
-            t = (torch.ones_like(x_t).to(x_t.device) * t).long()
-
             ### Implement the remaining of Algorithm 2 here ###
-            x_t = 1.0 / torch.sqrt(self.alpha[t]) * (x_t - self.beta[t] / torch.sqrt(1.0 - self.alpha_cumprod[t]) * self.network(x_t, t)) + noise * torch.sqrt(self.beta[t])
+            if t > 0:
+                noise = torch.randn(x_t.shape).to(self.alpha.device)
+            else:
+                noise = torch.zeros_like(x_t).to(self.alpha.device)
 
+            t = (torch.ones((shape,1)).to(self.alpha.device) * t).long()
+            t_normalized = t / self.T
+
+            x_t = 1.0 / torch.sqrt(self.alpha[t]) * (x_t - (1 - self.alpha[t]) / torch.sqrt(1.0 - self.alpha_cumprod[t]) * self.network(x_t, t_normalized)) + torch.sqrt(self.beta[t]) * noise
+        
         return x_t
 
     def loss(self, x):
@@ -98,7 +101,7 @@ class DDPM(nn.Module):
         [torch.Tensor]
             The loss for the batch.
         """
-        return self.negative_elbo(torch.flatten(x, start_dim=1)).mean()
+        return self.negative_elbo(x).mean()
 
 def train(model, optimizer, data_loader, epochs, device):
     """
@@ -122,10 +125,11 @@ def train(model, optimizer, data_loader, epochs, device):
     progress_bar = tqdm(range(total_steps), desc="Training")
 
     for epoch in range(epochs):
-        data_iter = iter(data_loader)
-        for x in data_iter:
+        # data_iter = iter(data_loader)
+        for x in data_loader:
             if isinstance(x, (list, tuple)):
                 x = x[0]
+            # print(x.shape)
             x = x.to(device)
             optimizer.zero_grad()
             loss = model.loss(x)
@@ -149,7 +153,7 @@ class FcNetwork(nn.Module):
         """
         super(FcNetwork, self).__init__()
         # print(f"input dim: {input_dim}")
-        self.network = nn.Sequential(nn.Linear(input_dim*2, num_hidden), nn.ReLU(), 
+        self.network = nn.Sequential(nn.Linear(input_dim+1, num_hidden), nn.ReLU(), 
                                      nn.Linear(num_hidden, num_hidden), nn.ReLU(), 
                                      nn.Linear(num_hidden, input_dim))
 
@@ -180,7 +184,7 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default='model.pt', help='file to save model to or load model from (default: %(default)s)')
     parser.add_argument('--samples', type=str, default='samples.png', help='file to save samples in (default: %(default)s)')
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda', 'mps'], help='torch device (default: %(default)s)')
-    parser.add_argument('--batch-size', type=int, default=10000, metavar='N', help='batch size for training (default: %(default)s)')
+    parser.add_argument('--batch-size', type=int, default=1000, metavar='N', help='batch size for training (default: %(default)s)')
     parser.add_argument('--epochs', type=int, default=1, metavar='N', help='number of epochs to train (default: %(default)s)')
     parser.add_argument('--lr', type=float, default=1e-3, metavar='V', help='learning rate for training (default: %(default)s)')
 
@@ -190,20 +194,29 @@ if __name__ == "__main__":
         print(key, '=', value)
 
     # Load MNIST and create data loaders
-    train_loader = torch.utils.data.DataLoader(datasets.MNIST('data/', train=True,
-                                                                    transform=transforms.Compose([transforms.ToTensor()])),
-                                                    batch_size=args.batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(datasets.MNIST('data/', train=False,
-                                                                transform=transforms.Compose([transforms.ToTensor()])),
-                                                    batch_size=args.batch_size, shuffle=True)
-
-    # Get the dimension of the dataset
-    D = next(iter(train_loader))[0].shape
-
-    print(D)
+    # train_loader = torch.utils.data.DataLoader(datasets.MNIST('data/', train=True,
+    #                                                                 transform=transforms.Compose([transforms.ToTensor()])),
+    #                                                 batch_size=args.batch_size, shuffle=True)
+    # test_loader = torch.utils.data.DataLoader(datasets.MNIST('data/', train=False,
+    #                                                             transform=transforms.Compose([transforms.ToTensor()])),
+    #                                                 batch_size=args.batch_size, shuffle=True)
+    
+    transform=transforms.Compose([transforms.ToTensor(), 
+                                  transforms.Lambda(lambda x: x + torch.rand(x.shape)/255), 
+                                  transforms.Lambda(lambda x: (x-0.5)*2.0), 
+                                  transforms.Lambda(lambda x: x.flatten())]) 
+    train_loader = torch.utils.data.DataLoader(
+        datasets.MNIST('data/', 
+                                train=True, 
+                                download=True, 
+                                transform=transform),
+                                batch_size=args.batch_size, 
+                                shuffle=True
+                                )
 
     # Define the network
-    num_hidden = 100
+    num_hidden = 256
+    network = FcNetwork(input_dim=28*28, num_hidden=num_hidden)
     network = Unet()
 
     # Set the number of steps in the diffusion process
